@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ironwood Protocol — Tactical FPS</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#090d12;color:#e9eef5;font-family:system-ui,Segoe UI,sans-serif}
+canvas{display:block}
+#menu,#overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 30%,#1b2835cc,#05080ddd);z-index:10}
+.panel{width:min(720px,90vw);padding:32px;border:1px solid #526273;border-radius:16px;background:#101821ee;box-shadow:0 20px 80px #000}
+h1{margin:0 0 6px;font-size:42px;letter-spacing:4px}.sub{color:#8ea0b4;margin-bottom:24px}
+button,select{font:inherit;background:#182533;color:#e9eef5;border:1px solid #526273;border-radius:8px;padding:11px 15px;cursor:pointer}
+button:hover{background:#223447}.row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+#hud{position:fixed;inset:0;pointer-events:none;z-index:4;display:none}
+#cross{position:absolute;left:50%;top:50%;width:18px;height:18px;transform:translate(-50%,-50%)}
+#cross:before,#cross:after{content:"";position:absolute;background:#d9e7f2}.a{left:8px;top:0;width:2px;height:18px}.b{left:0;top:8px;width:18px;height:2px}
+#info{position:absolute;left:20px;bottom:18px;background:#091018bb;padding:12px;border-radius:9px}
+#ammo{position:absolute;right:22px;bottom:18px;text-align:right;font-size:20px}
+#timer{position:absolute;left:50%;top:18px;transform:translateX(-50%);font-size:22px;font-weight:700}
+#objective{position:absolute;left:50%;top:52px;transform:translateX(-50%);font-size:14px;color:#b9c9d8}
+#feed{position:absolute;right:20px;top:70px;text-align:right;font-size:13px;max-width:340px}
+#team{position:absolute;left:20px;top:18px;font-size:13px;line-height:1.6}
+#hint{position:absolute;bottom:72px;left:50%;transform:translateX(-50%);background:#101820dd;padding:8px 12px;border-radius:7px}
+#damage{position:fixed;inset:0;pointer-events:none;z-index:5;background:#d00;opacity:0}
+.hidden{display:none!important}.danger{color:#ff9b9b}.good{color:#a9efbd}
+</style>
+</head>
+<body>
+<div id="menu"><div class="panel">
+<h1>IRONWOOD PROTOCOL</h1><div class="sub">Eredeti, offline, 5v5 taktikai FPS — egyetlen HTML fájlban.</div>
+<div class="row"><button id="play">PLAY</button><label>Difficulty <select id="difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label></div>
+<div class="row"><button id="operator">Operator: Vanta</button><button id="weapon">Weapon: AR-7</button></div>
+<p>WASD mozgás · egér célzás/lövés · Shift sprint · Ctrl guggolás · Space ugrás · R újratöltés · 1/2/3 fegyver · E interakció</p>
+<p style="color:#8394a6">Offline működés: nincs külső asset, hálózati kérés vagy szerver.</p>
+</div></div>
+<div id="hud">
+<div id="timer">02:30</div><div id="objective">OBJ: SECURE THE CORE</div><div id="team"></div><div id="feed"></div>
+<div id="cross"><i class="a"></i><i class="b"></i></div>
+<div id="hint">Kattints a játékablakra a kamera vezérléséhez.</div>
+<div id="info">HP <b id="hp">100</b> · <span id="state">READY</span></div>
+<div id="ammo"><b id="mag">30</b> / <span id="reserve">120</span><br><small id="gun">AR-7</small></div>
+</div><div id="damage"></div><div id="overlay" class="hidden"><div class="panel"><h1 id="result">ROUND OVER</h1><p id="resultText"></p><button id="next">NEXT ROUND</button></div></div>
+
+<script>
+/* Ironwood Protocol: intentionally self-contained. 3D renderer, collision, weapons,
+   destructible cover, objective, bots, AI state machine, rounds and HUD. */
+const C=document.createElement('canvas');document.body.appendChild(C);const ctx=C.getContext('2d');
+function resize(){C.width=innerWidth;C.height=innerHeight}addEventListener('resize',resize);resize();
+const menu=document.querySelector('#menu'),hud=document.querySelector('#hud'),overlay=document.querySelector('#overlay');
+const keys={}, mouse={x:0,y:0,dx:0,dy:0,down:false}; let locked=false;
+addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='KeyR')reload();if(e.code==='Digit1')equip('AR-7');if(e.code==='Digit2')equip('SMG-2');if(e.code==='Digit3')equip('BREACH-12');});
+addEventListener('keyup',e=>keys[e.code]=false);
+C.addEventListener('click',()=>C.requestPointerLock());document.addEventListener('pointerlockchange',()=>{locked=document.pointerLockElement===C;document.querySelector('#hint').style.display=locked?'none':'block'});
+document.addEventListener('mousemove',e=>{if(locked){mouse.dx+=e.movementX;mouse.dy+=e.movementY}});
+addEventListener('mousedown',e=>{if(e.button===0)mouse.down=true});addEventListener('mouseup',e=>{if(e.button===0)mouse.down=false});
+const weapons={
+"AR-7":{d:25,hs:2.0,rate:105,mag:30,res:120,spread:.035,reload:1.8},
+"SMG-2":{d:18,hs:2.0,rate:720,mag:36,res:144,spread:.07,reload:1.5},
+"BREACH-12":{d:12,hs:1.8,rate:70,mag:8,res:40,spread:.18,reload:2.2, pellets:7}
+};
+let gun="AR-7",ammo=30,reserve=120,lastShot=0,reloadEnd=0;
+function equip(w){gun=w;ammo=Math.min(weapons[w].mag,ammo+0);reserve=Math.max(reserve,40);document.querySelector('#gun').textContent=w;document.querySelector('#mag').textContent=ammo}
+function reload(){if(reloadEnd||ammo===weapons[gun].mag||reserve<=0)return;reloadEnd=performance.now()+weapons[gun].reload*1000}
+const world={w:64,h:48,walls:[],cover:[],doors:[],objective:{x:48,z:24,active:false,progress:0},stairs:{x:32,z:24}};
+function wall(x,z,w,d,h=4,destruct=false){world.walls.push({x,z,w,d,h,destruct,hp:destruct?180:1e9,dead:false})}
+function setupMap(){
+ wall(0,0,64,1);wall(0,48,64,1);wall(0,0,1,48);wall(64,0,1,48);
+ wall(20,0,1,15);wall(20,28,1,20);wall(44,0,1,12);wall(44,20,1,28);
+ wall(20,15,10,1);wall(34,15,10,1);wall(20,34,10,1);wall(34,34,10,1);
+ wall(30,15,1,7);wall(30,27,1,7,true);wall(34,15,1,7);wall(34,27,1,7,true);
+ wall(20,24,10,1,true);wall(34,24,10,1,true);
+ // interior furniture / cover
+ [[9,9],[15,8],[9,38],[15,40],[51,8],[57,12],[51,38],[57,40],[28,20],[38,28],[26,29],[40,19]].forEach(([x,z])=>world.cover.push({x,z,w:2.5,d:1.2,h:1.3}));
+}
+setupMap();
+const agents=[];let player={x:8,z:24,y:1.6,yaw:0,pitch:0,hp:100,team:'A',alive:true,hasObj:false};
+function spawn(name,team,x,z,role){agents.push({name,team,x,z,y:1.2,hp:100,alive:true,role,state:'idle',target:null,lastSeen:null,cool:0,mag:30,res:120,cover:null,dir:Math.random()*6.28})}
+const attackSpawns=[[7,18],[7,24],[7,30],[13,20],[13,28]],defSpawns=[[57,18],[57,24],[57,30],[51,20],[51,28]];
+for(let i=0;i<4;i++)spawn('A'+(i+1),'A',...attackSpawns[i+1],i?'rifle':'scout');
+for(let i=0;i<5;i++)spawn('D'+(i+1),'D',...defSpawns[i],i%2?'anchor':'roam');
+function dist(a,b){return Math.hypot(a.x-b.x,a.z-b.z)}
+function lineBlocked(a,b){
+ for(const w of world.walls)if(!w.dead){let vx=b.x-a.x,vz=b.z-a.z,t=((w.x-a.x)*vx+(w.z-a.z)*vz)/(vx*vx+vz*vz);t=Math.max(0,Math.min(1,t));let px=a.x+t*vx,pz=a.z+t*vz;if(Math.abs(px-w.x)<=w.w/2+.25&&Math.abs(pz-w.z)<=w.d/2+.25)return true}
+ return false
+}
+function visible(a,b){return dist(a,b)<32&&!lineBlocked(a,b)}
+function moveEnt(e,tx,tz,dt,speed){
+ let dx=tx-e.x,dz=tz-e.z,l=Math.hypot(dx,dz)||1;let nx=e.x+dx/l*speed*dt,nz=e.z+dz/l*speed*dt;
+ if(!collides(nx,nz,.55)){e.x=nx;e.z=nz}else{e.dir+=1.4*dt;e.x+=Math.cos(e.dir)*speed*.5*dt;e.z+=Math.sin(e.dir)*speed*.5*dt}
+}
+function collides(x,z,r){
+ if(x<1+r||x>63-r||z<1+r||z>47-r)return true;
+ for(const w of world.walls)if(!w.dead&&Math.abs(x-w.x)<w.w/2+r&&Math.abs(z-w.z)<w.d/2+r)return true;
+ return false
+}
+function shootAt(a,b,isPlayer=false){
+ let w=isPlayer?weapons[gun]:weapons['AR-7'], now=performance.now();
+ if(isPlayer){if(now-lastShot<60000/w.rate||reloadEnd)return;if(ammo<=0){reload();return}ammo--;lastShot=now}
+ else {if(now-a.cool<900||a.mag<=0){if(a.mag<=0)a.mag=30;return}a.cool=now;a.mag--}
+ if(!visible(a,b))return;
+ let spread=(isPlayer?w.spread:.11)*(difficulty==='easy'?1.8:difficulty==='hard'?.55:1);
+ let d=dist(a,b), hit=d<34 && Math.random()<Math.max(.25,1-spread*d/15);
+ if(!hit)return;
+ let head=Math.random()<.16, dmg=w.d*(head?w.hs:1);
+ b.hp-=dmg;if(b===player){document.querySelector('#damage').style.opacity=.2;setTimeout(()=>document.querySelector('#damage').style.opacity=0,70)}
+ if(b.hp<=0)kill(b,a,head);
+}
+function kill(v,k,head){v.alive=false;v.hp=0;document.querySelector('#feed').innerHTML=`<div>${k.name||'YOU'} → ${v.name||'BOT'} ${head?'[HEAD]':''}</div>`+document.querySelector('#feed').innerHTML.slice(0,700);checkRound()}
+function nearestEnemy(a){let all=a.team==='A'?[...agents.filter(x=>x.team==='D'&&x.alive),player.alive?player:null]:[...agents.filter(x=>x.team==='A'&&x.alive),player.team==='D'&&player.alive?player:null];all=all.filter(Boolean);return all.sort((x,y)=>dist(a,x)-dist(a,y))[0]}
+let difficulty='normal',round=1,timeLeft=150,roundLive=false,objectiveActive=false;
+function botThink(a,dt){
+ if(!a.alive)return;let e=nearestEnemy(a), speed=difficulty==='hard'?3.2:difficulty==='easy'?2.0:2.6;
+ if(e&&visible(a,e)){a.lastSeen={x:e.x,z:e.z,t:performance.now()};a.state='engage';if(dist(a,e)>9)moveEnt(a,e.x,e.z,dt,speed);else if(difficulty==='hard'&&Math.random()<.015){a.dir+=2.2}}
+ else if(a.lastSeen&&performance.now()-a.lastSeen.t<5000){a.state='search';moveEnt(a,a.lastSeen.x,a.lastSeen.z,dt,speed)}
+ else{
+  let target=a.team==='D'?{x:48,z:24}:{x:46,z:24};
+  if(a.team==='A'&&objectiveActive)target=world.objective;
+  if(dist(a,target)>4)moveEnt(a,target.x,target.z,dt,speed);
+  else{a.dir+=dt*.7;moveEnt(a,a.x+Math.cos(a.dir)*3,a.z+Math.sin(a.dir)*3,dt,speed*.5)}
+ }
+ if(e&&visible(a,e)&&dist(a,e)<28)shootAt(a,e,false);
+}
+function update(dt){
+ if(!roundLive)return;
+ if(reloadEnd&&performance.now()>reloadEnd){let need=weapons[gun].mag-ammo,got=Math.min(need,reserve);ammo+=got;reserve-=got;reloadEnd=0}
+ if(player.alive){
+  let sp=keys.ShiftLeft?7:4.2;if(keys.ControlLeft)sp=2.2;
+  let dx=(keys.KeyD?1:0)-(keys.KeyA?1:0),dz=(keys.KeyS?1:0)-(keys.KeyW?1:0),l=Math.hypot(dx,dz)||1;
+  let ca=Math.cos(player.yaw),sa=Math.sin(player.yaw);let mx=(dx*ca-dz*sa)/l*sp*dt,mz=(dx*sa+dz*ca)/l*sp*dt;
+  if(!collides(player.x+mx,player.z+mx*0+0.0,0)){} // retained for readability
+  let nx=player.x+mx,nz=player.z+mz;if(!collides(nx,nz,.45)){player.x=nx;player.z=nz}
+  player.yaw-=mouse.dx*.0022;player.pitch=Math.max(-1.3,Math.min(1.3,player.pitch-mouse.dy*.002));mouse.dx=mouse.dy=0;
+  if(mouse.down)shootAt(player,nearestEnemy(player),true);
+ }
+ agents.forEach(a=>botThink(a,dt));
+ if(player.alive&&keys.KeyE&&dist(player,world.objective)<3){objectiveActive=true;world.objective.progress+=dt*.25}
+ if(objectiveActive){world.objective.progress+=agents.filter(a=>a.team==='A'&&a.alive&&dist(a,world.objective)<3).length*dt*.01}
+ timeLeft-=dt;if(timeLeft<=0){endRound('Védők nyertek — lejárt az idő.');return}
+ if(objectiveActive&&world.objective.progress>=1)endRound('Támadók nyerték a kört — az objektív aktiválva.');
+}
+function checkRound(){
+ let A=agents.filter(a=>a.team==='A'&&a.alive).length+(player.team==='A'&&player.alive?1:0),D=agents.filter(a=>a.team==='D'&&a.alive).length;
+ if(A===0)endRound('Védők nyertek — minden támadó kiesett.');
+ if(D===0)endRound('Támadók nyertek — minden védő kiesett.');
+}
+function endRound(msg){if(!roundLive)return;roundLive=false;document.querySelector('#result').textContent='ROUND OVER';document.querySelector('#resultText').textContent=msg;overlay.classList.remove('hidden')}
+function nextRound(){round++;timeLeft=150;objectiveActive=false;world.objective.progress=0;player.x=8;player.z=24;player.hp=100;player.alive=true;agents.forEach((a,i)=>{a.alive=true;a.hp=100;a.mag=30;a.x=a.team==='A'?attackSpawns[(i%4)+1][0]:defSpawns[i%5][0];a.z=a.team==='A'?attackSpawns[(i%4)+1][1]:defSpawns[i%5][1];a.lastSeen=null});overlay.classList.add('hidden');roundLive=true}
+function render(){
+ ctx.fillStyle='#0a0f15';ctx.fillRect(0,0,C.width,C.height);
+ // stylized pseudo-3D ray projection
+ const horizon=C.height*.52;ctx.fillStyle='#1c252b';ctx.fillRect(0,horizon,C.width,C.height-horizon);ctx.fillStyle='#26343a';ctx.fillRect(0,0,C.width,horizon);
+ let cols=Math.max(80,Math.floor(C.width/5)), fov=Math.PI/2.8;
+ for(let i=0;i<cols;i++){let ang=player.yaw-fov/2+fov*i/cols, dx=Math.cos(ang),dz=Math.sin(ang),t=0;
+  while(t<80){t+=.12;let x=player.x+dx*t,z=player.z+dz*t,hit=false,hh=0;
+   for(const w of world.walls)if(!w.dead&&Math.abs(x-w.x)<w.w/2&&Math.abs(z-w.z)<w.d/2){hit=true;hh=w.h;break}
+   if(hit){let ph=C.height/(t*.75),top=horizon-ph*.5,bottom=horizon+ph*.5;ctx.fillStyle='#596771';ctx.fillRect(i*(C.width/cols),top,C.width/cols+1,ph);break}
+  }
+ }
+ // objective marker
+ if(world.objective){let dx=world.objective.x-player.x,dz=world.objective.z-player.z,ang=Math.atan2(dz,dx)-player.yaw;let x=C.width/2+Math.sin(ang)*Math.min(C.width*.38,300),y=C.height/2-Math.cos(ang)*120;ctx.fillStyle='#f0c95c';ctx.fillRect(x-4,y-4,8,8)}
+}
+let last=performance.now();
+function loop(now){let dt=Math.min(.05,(now-last)/1000);last=now;update(dt);render();hudUpdate();requestAnimationFrame(loop)}
+function hudUpdate(){if(!roundLive)return;document.querySelector('#hp').textContent=Math.ceil(player.hp);document.querySelector('#mag').textContent=reloadEnd?'...':ammo;document.querySelector('#reserve').textContent=reserve;document.querySelector('#timer').textContent=Math.max(0,Math.ceil(timeLeft/60)).toString().padStart(2,'0')+':'+Math.floor(timeLeft%60).toString().padStart(2,'0');document.querySelector('#objective').textContent=objectiveActive?'OBJ: ACTIVE — HOLD THE CORE':'OBJ: SECURE THE CORE';document.querySelector('#team').innerHTML=`ROUND ${round}<br>ALLY A1 A2 A3 A4`;document.querySelector('#state').textContent=player.hp<30?'CRITICAL':'READY'}
+document.querySelector('#play').onclick=()=>{difficulty=document.querySelector('#difficulty').value;menu.classList.add('hidden');hud.style.display='block';roundLive=true;C.requestPointerLock()};
+document.querySelector('#next').onclick=nextRound;
+document.querySelector('#operator').onclick=()=>{let n=prompt('Operátor: Vanta / Sable / Kestrel / Forge','Vanta');if(n)document.querySelector('#operator').textContent='Operator: '+n};
+document.querySelector('#weapon').onclick=()=>{let n=prompt('Fegyver: AR-7 / SMG-2 / BREACH-12','AR-7');if(weapons[n])equip(n)};
+requestAnimationFrame(loop);
+</script></body></html>
